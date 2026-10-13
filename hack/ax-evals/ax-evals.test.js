@@ -10,7 +10,7 @@ const path = require('node:path')
 const { test } = require('node:test')
 
 const plan = require('./plan.js')
-const { render } = require('./report.js')
+const { render, loadResults } = require('./report.js')
 const { upsertComment } = require('./comment.js')
 const config = require('./evals.json')
 
@@ -148,6 +148,34 @@ test('upsertComment: newest run wins, spoofed and duplicate markers', async () =
     throw Object.assign(new Error('Not Found'), { status: 404 })
   }
   assert.equal(await upsertComment(github, REPO, 7, 300, ['x']), true)
+})
+
+test('loadResults: reads <eval>.json from one directory, missing ones as not started', () => {
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'ax-results-'))
+  fs.writeFileSync(
+    path.join(dir, 'typescript.json'),
+    JSON.stringify({ name: 'typescript', finalStatus: 'completed', outcome: 'succeeded' }),
+  )
+  const results = loadResults(dir, [
+    { name: 'typescript', title: 'TypeScript SDK' },
+    { name: 'go', title: 'Go SDK' },
+  ])
+  assert.deepEqual(
+    results.map((r) => [r.title, r.finalStatus, r.outcome]),
+    [
+      ['TypeScript SDK', 'completed', 'succeeded'],
+      ['Go SDK', '', undefined],
+    ],
+  )
+})
+
+test('workflow: results are written and downloaded as <eval>.json in one directory', () => {
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '..', '.github', 'workflows', 'ax_evals.yaml'), 'utf8')
+  const evalJob = workflow.slice(workflow.indexOf('  eval:'), workflow.indexOf('  report:'))
+  const reportJob = workflow.slice(workflow.indexOf('  report:'))
+  assert.match(evalJob, /save-result\.js "result\/\$\{NAME\}\.json"/)
+  assert.match(evalJob, /path: result\/\$\{\{ matrix\.eval\.name \}\}\.json/)
+  assert.match(reportJob, /merge-multiple: true/)
 })
 
 test('render: every status label', () => {
