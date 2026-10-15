@@ -11,13 +11,16 @@ permissions:
   pages: write
   id-token: write
 
+# Runs from other branches deploy nothing; give them their own group so they
+# cannot cancel an in-progress deploy from main.
 concurrency:
-  group: pages
+  group: ${{ github.ref == 'refs/heads/main' && 'pages' || format('pages-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
   deploy:
-    if: github.repository == 'daytona/clients'
+    # Only main publishes the site, including manual runs.
+    if: github.repository == 'daytona/clients' && github.ref == 'refs/heads/main'
     runs-on: blacksmith-4vcpu-ubuntu-2404
     environment:
       name: github-pages
