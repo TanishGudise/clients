@@ -679,7 +679,7 @@ export class Image {
         }
 
         const importErrorPrefix = '"extractCopySources" is not supported: '
-        const fg = dynamicRequire('fast-glob', importErrorPrefix)
+        const tinyglobby = dynamicRequire('tinyglobby', importErrorPrefix)
         const fs = dynamicRequire('fs', importErrorPrefix)
         const realRoot = strictContext ? Image.resolveRealPath(fs, pathPrefix) : null
 
@@ -694,7 +694,7 @@ export class Image {
             // Handle absolute and relative paths differently
             const fullPathPattern = pathe.isAbsolute(source) ? source : pathe.join(pathPrefix, source)
 
-            const matchingFiles = fg.sync([fullPathPattern], { dot: true })
+            const matchingFiles = Image.expandCopySource(tinyglobby, pathPrefix, source)
             if (matchingFiles.length > 0) {
               for (const matchingFile of matchingFiles) {
                 Image.ensureWithinBuildContext(fs, realRoot, matchingFile)
@@ -834,5 +834,94 @@ export class Image {
       sources: elements.slice(0, -1),
       dest: elements[elements.length - 1],
     }
+  }
+
+  /**
+   * Expands a COPY source glob. Only the source is parsed as a glob; the context directory is
+   * taken literally, as Docker does. Matches are prefixed with the joined context directory, which
+   * callers slice to get archive paths.
+   *
+   * @param {any} tinyglobby - The tinyglobby module.
+   * @param {string} pathPrefix - The context directory prefix.
+   * @param {string} source - The COPY source.
+   * @returns {string[]} The matching paths, or an empty list for a literal source or no match.
+   */
+  private static expandCopySource(tinyglobby: any, pathPrefix: string, source: string): string[] {
+    const absolute = pathe.isAbsolute(source)
+    const normalized = absolute ? source : pathe.normalize(source)
+    // A glob with a trailing separator is kept as a literal path so that upload fails loudly,
+    // instead of silently matching only the files below it.
+    if (normalized.endsWith('/')) return []
+    const segments = Image.splitGlobSegments(normalized)
+    const globSegments = segments.map((segment) => Image.escapeLiteralParens(segment))
+    const baseLength = globSegments.findIndex((segment) => tinyglobby.isDynamicPattern(segment))
+    if (baseLength === -1) return []
+
+    const staticPart = segments.slice(0, baseLength).join('/')
+    const base = absolute ? staticPart || '/' : pathe.join(pathPrefix, staticPart)
+    let pattern = globSegments.slice(baseLength).join('/')
+    // A leading `!` would make tinyglobby read the pattern as a negation; Docker reads it literally
+    if (pattern.startsWith('!') && !pattern.startsWith('!(')) pattern = `\\${pattern}`
+
+    const matches: string[] = tinyglobby.globSync([pattern], { cwd: base, dot: true, expandDirectories: false })
+    return matches.map((match) => pathe.join(base, match))
+  }
+
+  /**
+   * Escapes parentheses that do not open an extglob group (`@(`, `!(`, `?(`, `+(`, `*(`), so a
+   * directory such as Next.js's `(marketing)` matches literally, as Docker reads it.
+   *
+   * @param {string} segment - A glob path segment.
+   * @returns {string} The segment with its literal parentheses escaped.
+   */
+  private static escapeLiteralParens(segment: string): string {
+    let escaped = ''
+    const groups: boolean[] = []
+    for (let i = 0; i < segment.length; i++) {
+      const char = segment[i]
+      if (char === '\\') {
+        escaped += char + (segment[i + 1] ?? '')
+        i++
+      } else if (char === '(') {
+        const extglob = i > 0 && '@!?+*'.includes(segment[i - 1])
+        groups.push(extglob)
+        escaped += extglob ? char : '\\('
+      } else if (char === ')' && groups.length > 0) {
+        escaped += groups.pop() ? char : '\\)'
+      } else if (char === ')') {
+        escaped += '\\)'
+      } else {
+        escaped += char
+      }
+    }
+    return escaped
+  }
+
+  /**
+   * Splits a glob pattern on the `/` separators outside brace and extglob groups, so a group
+   * such as `{sub/a.txt,b.txt}` stays one segment.
+   *
+   * @param {string} pattern - The glob pattern.
+   * @returns {string[]} The pattern's path segments.
+   */
+  private static splitGlobSegments(pattern: string): string[] {
+    const segments: string[] = []
+    let braces = 0
+    let parens = 0
+    let start = 0
+    for (let i = 0; i < pattern.length; i++) {
+      const char = pattern[i]
+      if (char === '\\') i++
+      else if (char === '{') braces++
+      else if (char === '}' && braces > 0) braces--
+      else if (char === '(' && i > 0 && '@!?+*'.includes(pattern[i - 1])) parens++
+      else if (char === ')' && parens > 0) parens--
+      else if (char === '/' && braces === 0 && parens === 0) {
+        segments.push(pattern.slice(start, i))
+        start = i + 1
+      }
+    }
+    segments.push(pattern.slice(start))
+    return segments
   }
 }
