@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -151,6 +152,50 @@ class TestPtyHandle:
         assert received == [b"hello", b"world"]
         assert result.exit_code == 0
         assert result.error is None
+
+    def test_wait_timeout_returns_on_idle_pty(self):
+        handle, ws = self._make_handle()
+
+        def receive(timeout=None):
+            if timeout is None:
+                raise AssertionError("receive() was called without a timeout while the PTY was idle")
+            raise queue.Empty
+
+        ws.receive.side_effect = receive
+
+        result = handle.wait(timeout=0.5)
+
+        assert result.exit_code is None
+        assert result.error is None
+        assert handle.is_connected() is True
+        assert ws.receive.call_args_list
+        assert all(0 < call.kwargs["timeout"] <= 0.5 for call in ws.receive.call_args_list)
+
+    def test_wait_after_idle_timeout_keeps_output_and_can_wait_again(self):
+        handle, ws = self._make_handle()
+        events = iter([_text("name? "), queue.Empty(), _text("bye"), CloseConnection(code=1000, reason=None)])
+
+        def receive(timeout=None):
+            event = next(events)
+            if isinstance(event, Exception):
+                raise event
+            return event
+
+        ws.receive.side_effect = receive
+        received: list[bytes] = []
+
+        first = handle.wait(on_data=received.append, timeout=5)
+
+        assert received == [b"name? "]
+        assert first.exit_code is None
+        assert first.error is None
+        assert handle.is_connected() is True
+
+        second = handle.wait(on_data=received.append)
+
+        assert received == [b"name? ", b"bye"]
+        assert second.exit_code == 0
+        assert second.error is None
 
     def test_iterator_terminates_on_websocket_disconnect(self):
         handle, ws = self._make_handle()
