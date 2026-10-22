@@ -271,6 +271,7 @@ class PtyHandle:
             on_data: Optional callback for handling PTY output data
             timeout: Optional timeout in seconds. If the process has not exited when it elapses, whether or not
                 the PTY is producing output, returns with ``exit_code`` None and leaves the session connected.
+                A timeout of 0 or None means no timeout, consistent with the rest of the Python SDK.
 
         Returns:
             PtyResult: Result containing exit code and error (if any)

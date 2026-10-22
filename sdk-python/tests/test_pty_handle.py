@@ -197,6 +197,52 @@ class TestPtyHandle:
         assert second.exit_code == 0
         assert second.error is None
 
+    def test_wait_timeout_returns_on_busy_pty(self, monkeypatch):
+        handle, ws = self._make_handle()
+        clock = [100.0]
+        monkeypatch.setattr("daytona.handle.pty_handle.time.monotonic", lambda: clock[0])
+        events = iter([_text("tick")] * 5 + [CloseConnection(code=1000, reason=None)])
+
+        def receive(timeout=None):
+            clock[0] += min(0.25, timeout)
+            return next(events)
+
+        ws.receive.side_effect = receive
+
+        received: list[bytes] = []
+        result = handle.wait(on_data=received.append, timeout=1.0)
+
+        assert received == [b"tick"] * 4
+        assert result.exit_code is None
+        assert result.error is None
+        assert handle.is_connected() is True
+        assert [call.kwargs["timeout"] for call in ws.receive.call_args_list] == [1.0, 0.75, 0.5, 0.25]
+
+    def test_wait_timeout_after_output_then_idle_waits_only_the_remaining_time(self, monkeypatch):
+        handle, ws = self._make_handle()
+        clock = [100.0]
+        monkeypatch.setattr("daytona.handle.pty_handle.time.monotonic", lambda: clock[0])
+        timeouts: list[float] = []
+
+        def receive(timeout=None):
+            timeouts.append(timeout)
+            if len(timeouts) == 1:
+                clock[0] += 0.3
+                return _text("prompt> ")
+            clock[0] += timeout
+            raise queue.Empty
+
+        ws.receive.side_effect = receive
+
+        received: list[bytes] = []
+        result = handle.wait(on_data=received.append, timeout=1.0)
+
+        assert received == [b"prompt> "]
+        assert timeouts == pytest.approx([1.0, 0.7])
+        assert result.exit_code is None
+        assert result.error is None
+        assert handle.is_connected() is True
+
     def test_iterator_terminates_on_websocket_disconnect(self):
         handle, ws = self._make_handle()
         ws.receive.side_effect = [
